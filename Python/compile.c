@@ -164,6 +164,8 @@ struct compiler_unit {
     basicblock *u_blocks;
     basicblock *u_curblock; /* pointer to current block */
 
+    Py_ssize_t u_stmts_depth;
+
     int u_nfblocks;
     struct fblockinfo u_fblock[CO_MAXBLOCKS];
 
@@ -638,6 +640,7 @@ compiler_enter_scope(struct compiler *c, identifier name,
         return 0;
     }
 
+    u->u_stmts_depth = 0;
     u->u_private = NULL;
 
     /* Push the old compiler_unit on the stack. */
@@ -1640,6 +1643,36 @@ find_ann(asdl_stmt_seq *stmts)
     return res;
 }
 
+static int
+forbidden_name(struct compiler *c, identifier name, expr_context_ty ctx);
+
+static int
+collect_top_ann(struct compiler *c, asdl_stmt_seq *stmts)
+{
+    int ann_count = 0;
+    stmt_ty st;
+
+    for (int i = 0; i < asdl_seq_LEN(stmts); i++) {
+        st = (stmt_ty)asdl_seq_GET(stmts, i);
+        if (st->kind == AnnAssign_kind && st->v.AnnAssign.target->kind == Name_kind) {
+            expr_ty targ = st->v.AnnAssign.target;
+
+            if (forbidden_name(c, targ->v.Name.id, Store)) {
+                return -1;
+            }
+
+            if (st->v.AnnAssign.simple
+                && (c->u->u_scope_type == COMPILER_SCOPE_MODULE || c->u->u_scope_type == COMPILER_SCOPE_CLASS)) {
+                ADDOP_LOAD_CONST_NEW(c, _Py_Mangle(c->u->u_private, targ->v.Name.id));
+                ADDOP_LOAD_CONST_NEW(c, _PyAST_ExprAsUnicode(st->v.AnnAssign.annotation));
+
+                ann_count += 2;
+            }
+        }
+    }
+    return ann_count;
+}
+
 /*
  * Frame block handling functions
  */
@@ -1820,6 +1853,13 @@ compiler_body(struct compiler *c, asdl_stmt_seq *stmts)
     }
     /* Every annotated class and module should have __annotations__. */
     if (find_ann(stmts)) {
+        int ann_count = collect_top_ann(c, stmts);
+
+        if (ann_count < 0) {
+            return -1;
+        }
+
+        ADDOP_I(c, BUILD_TUPLE, ann_count);
         ADDOP(c, SETUP_ANNOTATIONS);
     }
     if (!asdl_seq_LEN(stmts))
@@ -1864,6 +1904,7 @@ compiler_mod(struct compiler *c, mod_ty mod)
         break;
     case Interactive_kind:
         if (find_ann(mod->v.Interactive.body)) {
+            ADDOP_I(c, BUILD_TUPLE, 0);
             ADDOP(c, SETUP_ANNOTATIONS);
         }
         c->c_interactive = 1;
@@ -3383,7 +3424,7 @@ compiler_visit_stmt_expr(struct compiler *c, expr_ty value)
 }
 
 static int
-compiler_visit_stmt(struct compiler *c, stmt_ty s)
+_compiler_visit_stmt(struct compiler *c, stmt_ty s)
 {
     Py_ssize_t i, n;
 
@@ -3464,6 +3505,14 @@ compiler_visit_stmt(struct compiler *c, stmt_ty s)
     }
 
     return 1;
+}
+
+static int
+compiler_visit_stmt(struct compiler *c, stmt_ty s) {
+    c->u->u_stmts_depth++;
+    int res = _compiler_visit_stmt(c, s);
+    c->u->u_stmts_depth--;
+    return res;
 }
 
 static int
@@ -5274,8 +5323,10 @@ compiler_annassign(struct compiler *c, stmt_ty s)
             return 0;
         /* If we have a simple name in a module or class, store annotation. */
         if (s->v.AnnAssign.simple &&
+            c->u->u_stmts_depth > 1 &&
             (c->u->u_scope_type == COMPILER_SCOPE_MODULE ||
              c->u->u_scope_type == COMPILER_SCOPE_CLASS)) {
+
             VISIT(c, annexpr, s->v.AnnAssign.annotation);
             ADDOP_NAME(c, LOAD_NAME, __annotations__, names);
             mangled = _Py_Mangle(c->u->u_private, targ->v.Name.id);

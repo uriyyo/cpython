@@ -1,0 +1,2 @@
+Optimize module/class annotations inner representation. Patch provided by
+Yurii Karabas.

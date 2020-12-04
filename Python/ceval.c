@@ -1199,7 +1199,7 @@ _PyEval_EvalFrameDefault(PyThreadState *tstate, PyFrameObject *f, int throwflag)
 #define SET_SECOND(v)     (stack_pointer[-2] = (v))
 #define SET_THIRD(v)      (stack_pointer[-3] = (v))
 #define SET_FOURTH(v)     (stack_pointer[-4] = (v))
-#define BASIC_STACKADJ(n) (stack_pointer += n)
+#define BASIC_STACKADJ(n) (stack_pointer += (n))
 #define BASIC_PUSH(v)     (*stack_pointer++ = (v))
 #define BASIC_POP()       (*--stack_pointer)
 
@@ -3008,6 +3008,9 @@ main_loop:
         case TARGET(SETUP_ANNOTATIONS): {
             _Py_IDENTIFIER(__annotations__);
             int err;
+
+            PyTuple_CheckExact(TOP());
+            PyObject *ann_tuple = POP();
             PyObject *ann_dict;
             if (f->f_locals == NULL) {
                 _PyErr_Format(tstate, PyExc_SystemError,
@@ -3060,6 +3063,25 @@ main_loop:
                 else {
                     Py_DECREF(ann_dict);
                 }
+            }
+
+            assert(PyTuple_GET_SIZE(ann_tuple) % 2 == 0);
+
+            int(*set_item)(PyObject*, PyObject*, PyObject*);
+
+            if (PyDict_CheckExact(ann_dict)) {
+                set_item = &PyDict_SetItem;
+            } else {
+                set_item = &PyObject_SetItem;
+            }
+
+            for (Py_ssize_t i = 0; i < PyTuple_GET_SIZE(ann_tuple); i += 2) {
+                err = set_item(ann_dict,
+                               PyTuple_GET_ITEM(ann_tuple, i),
+                               PyTuple_GET_ITEM(ann_tuple, i + 1));
+
+                if (err < 0)
+                    goto error;
             }
             DISPATCH();
         }
